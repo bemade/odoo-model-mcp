@@ -1,6 +1,6 @@
 [project]
 name = "odoo-model-mcp"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "MCP server exposing Odoo model registry without a database connection"
 license = "LGPL-3.0-only"
 authors = [
