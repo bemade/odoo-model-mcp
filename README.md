@@ -7,8 +7,7 @@ Point it at any Odoo project directory and get instant, structured answers about
 models, fields, method override chains, and inheritance graphs — powered by
 Odoo's own `MetaModel` registry loaded in-memory.
 
-> **Status:** Pre-alpha (0.1.0a1). Works with Odoo 16–18. Odoo 19 support is
-> in progress.
+> **Status:** Pre-alpha (0.1.0a1). Works with Odoo 16–19.
 
 ## How it works
 

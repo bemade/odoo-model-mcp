@@ -60,10 +60,12 @@ def extract_field_info(model_cls, field_name: str) -> dict | None:
         method = getattr(model_cls, compute_name, None)
         if method:
             depends = getattr(method, "_depends", None)
-            if depends:
+            if depends and not callable(depends):
                 info["depends"] = (
                     list(depends) if not isinstance(depends, str) else [depends]
                 )
+            elif callable(depends):
+                info["depends"] = "<dynamic>"
 
     # Track which modules defined/overrode this field
     for klass, f in field_defs:
@@ -106,9 +108,12 @@ def extract_method_info(model_cls, method_name: str) -> list[dict]:
         ):
             val = getattr(method, attr, None)
             if val:
-                entry[key] = (
-                    list(val) if not isinstance(val, str) else [val]
-                )
+                if callable(val):
+                    entry[key] = "<dynamic>"
+                elif isinstance(val, str):
+                    entry[key] = [val]
+                else:
+                    entry[key] = list(val)
 
         # Source location
         try:

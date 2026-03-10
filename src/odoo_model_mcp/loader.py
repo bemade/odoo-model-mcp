@@ -161,6 +161,20 @@ def _parse_odoo_conf(project_root: Path) -> list[str] | None:
     return None
 
 
+def _detect_odoo_major_version(odoo_root: Path) -> int:
+    """Detect the major Odoo version from release.py."""
+    release_file = odoo_root / "odoo" / "release.py"
+    if release_file.exists():
+        for line in release_file.read_text().splitlines():
+            if line.startswith("version_info"):
+                try:
+                    parts = line.split("(")[1].split(")")[0].split(",")
+                    return int(parts[0].strip())
+                except (IndexError, ValueError):
+                    pass
+    return 0
+
+
 def configure_odoo(odoo_path: str, addons_paths: list[str]):
     """Add Odoo to sys.path and configure addons paths."""
     odoo_root = Path(odoo_path).resolve()
@@ -189,7 +203,9 @@ def configure_odoo(odoo_path: str, addons_paths: list[str]):
         resolved.append(top_addons)
 
     config["addons_path"] = ",".join(resolved)
-    odoo.modules.module.initialize_sys_path()
+
+    from odoo.modules.module import initialize_sys_path
+    initialize_sys_path()
 
 
 def discover_modules(
@@ -268,18 +284,84 @@ def import_modules(modules: list[str]) -> dict[str, str]:
     return failures
 
 
-def build_registry(modules: list[str]) -> dict:
-    """Call _build_model for all registered classes to resolve inheritance.
+def _get_module_to_models() -> dict:
+    """Get the MetaModel module-to-models mapping (version-agnostic)."""
+    try:
+        # Odoo 19+: odoo.orm.models.MetaModel._module_to_models__
+        from odoo.orm.models import MetaModel
+        return MetaModel._module_to_models__
+    except (ImportError, AttributeError):
+        pass
 
-    Returns the pool dict mapping model names to registry classes.
-    """
+    # Odoo 16–18: odoo.models.MetaModel.module_to_models
     from odoo.models import MetaModel
+    return MetaModel.module_to_models
+
+
+def _is_odoo_19() -> bool:
+    """Check if the loaded Odoo version is 19+."""
+    try:
+        from odoo.orm import model_classes  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _build_registry_v19(modules: list[str]) -> dict:
+    """Build registry using Odoo 19's model_classes.add_to_registry."""
+    from odoo.orm import model_classes
+
+    module_to_models = _get_module_to_models()
+
+    # Odoo 19's add_to_registry expects a registry object that supports
+    # dict-like access plus a .descendants() method. We use a simple
+    # wrapper around a dict.
+    pool = _RegistryProxy()
+    failed_models = {}
+
+    for mod in modules:
+        for cls in module_to_models.get(mod, []):
+            try:
+                model_classes.add_to_registry(pool, cls)
+            except Exception as e:
+                model_name = getattr(cls, "_name", None) or getattr(
+                    cls, "_inherit", ["unknown"]
+                )
+                logger.warning(
+                    "Failed to build model %s from %s: %s", model_name, mod, e
+                )
+                failed_models[str(model_name)] = str(e)
+
+    # Apply __bases__ fixup from _base_classes__ (Odoo 19 uses this name
+    # without Python name-mangling)
+    fixup_count = 0
+    for name, model_cls in pool.items():
+        base_classes = model_cls.__dict__.get("_base_classes__")
+        if base_classes and model_cls.__bases__ != base_classes:
+            try:
+                model_cls.__bases__ = base_classes
+                fixup_count += 1
+            except TypeError as e:
+                logger.debug("Could not fix __bases__ for %s: %s", name, e)
+
+    logger.info(
+        "Built %d models (%d failed, %d bases fixed)",
+        len(pool),
+        len(failed_models),
+        fixup_count,
+    )
+    return dict(pool)
+
+
+def _build_registry_v18(modules: list[str]) -> dict:
+    """Build registry using Odoo 16–18's _build_model."""
+    module_to_models = _get_module_to_models()
 
     pool = {}
     failed_models = {}
 
     for mod in modules:
-        for cls in MetaModel.module_to_models.get(mod, []):
+        for cls in module_to_models.get(mod, []):
             try:
                 cls._build_model(pool, None)
             except Exception as e:
@@ -319,6 +401,40 @@ def build_registry(modules: list[str]) -> dict:
         fixup_count,
     )
     return pool
+
+
+class _RegistryProxy(dict):
+    """Minimal dict subclass that satisfies Odoo 19's Registry interface
+    for model building (supports dict ops + descendants())."""
+
+    def descendants(self, model_names, *args):
+        """Yield model names and their transitive children."""
+        from collections import deque
+        todo = deque(model_names)
+        result = set()
+        while todo:
+            name = todo.popleft()
+            if name in result:
+                continue
+            result.add(name)
+            model_cls = self.get(name)
+            if model_cls:
+                for attr in args:
+                    children = getattr(model_cls, attr, None)
+                    if children:
+                        todo.extend(children)
+        return result
+
+
+def build_registry(modules: list[str]) -> dict:
+    """Build the model registry from imported modules.
+
+    Detects the Odoo version and uses the appropriate build strategy.
+    Returns the pool dict mapping model names to registry classes.
+    """
+    if _is_odoo_19():
+        return _build_registry_v19(modules)
+    return _build_registry_v18(modules)
 
 
 def load_registry(
