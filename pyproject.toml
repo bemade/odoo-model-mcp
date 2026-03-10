@@ -1,0 +1,44 @@
+[project]
+name = "odoo-model-mcp"
+version = "0.1.0a1"
+description = "MCP server exposing Odoo model registry without a database connection"
+license = "LGPL-3.0-only"
+authors = [
+    { name = "Marc Durepos, Bemade Inc.", email = "marc@bemade.org" },
+]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Odoo",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["odoo", "mcp", "model-context-protocol", "introspection", "registry"]
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.26.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bemade/odoo-model-mcp"
+Repository = "https://github.com/bemade/odoo-model-mcp"
+Issues = "https://github.com/bemade/odoo-model-mcp/issues"
+
+[project.scripts]
+odoo-model-mcp = "odoo_model_mcp.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "odoo_model_mcp"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
