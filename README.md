@@ -120,6 +120,31 @@ models that inherit from it.
 model_graph(project_path="/path/to/project", model_name="sale.order")
 ```
 
+### `list_models`
+
+Lightweight listing of every model in the registry (name, description,
+module, field count, abstract/transient flags). Use when you need a catalog
+but not per-field detail.
+
+```
+list_models(project_path="/path/to/project")
+```
+
+### `dump_registry`
+
+Bulk-export the entire registry as JSONL to a file on disk. One call
+replaces thousands of per-model round trips; intended for downstream
+pipelines (indexers, embedders, static analysis). Writes records of two
+types:
+
+- `{"type": "model", "data": {...model_info...}}` — one per model
+- `{"type": "method_overrides", "model": "...", "method": "...", "overrides": [...]}` —
+  one per decorated method, with file/line for each override in the MRO chain
+
+```
+dump_registry(project_path="/path/to/project", output_path="/tmp/registry.jsonl")
+```
+
 ## Project auto-detection
 
 The server detects project structure automatically:
