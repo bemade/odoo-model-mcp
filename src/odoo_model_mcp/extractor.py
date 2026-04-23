@@ -159,13 +159,28 @@ def extract_model_info(pool: dict, model_name: str) -> dict | None:
     if inherits:
         info["inherits"] = dict(inherits)
 
-    # Modules that extend this model (from MRO)
+    # Modules that extend this model (from MRO), with source location per class
     extending_modules = []
-    for klass in model_cls.__mro__:
+    class_locations = []
+    seen_modules = set()
+    for order, klass in enumerate(model_cls.__mro__):
         mod = getattr(klass, "_module", None)
-        if mod and mod not in extending_modules:
-            extending_modules.append(mod)
+        if not mod or mod in seen_modules:
+            continue
+        seen_modules.add(mod)
+        extending_modules.append(mod)
+
+        loc: dict = {"module": mod, "class": klass.__qualname__, "order": order}
+        try:
+            loc["file"] = inspect.getfile(klass)
+            lines, line_start = inspect.getsourcelines(klass)
+            loc["line_start"] = line_start
+            loc["line_end"] = line_start + len(lines) - 1
+        except (TypeError, OSError):
+            pass
+        class_locations.append(loc)
     info["extending_modules"] = extending_modules
+    info["class_locations"] = class_locations
 
     # Models with a different _name that inherit from this one
     children = getattr(model_cls, "_inherit_children", None)
