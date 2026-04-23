@@ -1,5 +1,6 @@
 """Extract structured metadata from the Odoo model registry."""
 
+import ast
 import inspect
 import logging
 
@@ -7,6 +8,12 @@ logger = logging.getLogger(__name__)
 
 
 _CLASS_LOCATION_CACHE: dict[int, dict[str, object] | None] = {}
+
+# file_path -> { (class_qualname, class_line_start): [field_dict, ...] }
+# inspect.getsourcelines can't locate class-body assignments, so we
+# AST-parse each source file once per registry load and cache the
+# resulting index.
+_FILE_FIELDS_CACHE: dict[str, dict[tuple[str, int], list[dict]]] = {}
 
 
 def _class_location(klass: type) -> dict[str, object] | None:
@@ -32,6 +39,124 @@ def _class_location(klass: type) -> dict[str, object] | None:
         result = None
     _CLASS_LOCATION_CACHE[key] = result
     return result
+
+
+def _is_fields_call(node: ast.AST) -> tuple[bool, str | None]:
+    """Return (is_fields_call, field_type).
+
+    Matches both ``fields.Many2one(...)`` and ``fields.Many2one(...)``
+    with dotted callee forms, accepting any attribute name off of a
+    name or attribute ending in ``fields``.
+    """
+    if not isinstance(node, ast.Call):
+        return False, None
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        owner = func.value
+        if isinstance(owner, ast.Name) and owner.id == "fields":
+            return True, func.attr
+        if isinstance(owner, ast.Attribute) and owner.attr == "fields":
+            return True, func.attr
+    return False, None
+
+
+_RELATIONAL_FIELD_TYPES = {"Many2one", "One2many", "Many2many", "Reference"}
+
+
+def _extract_field_kwargs(call: ast.Call, field_type: str | None) -> dict[str, object]:
+    """Pull a minimal set of literal kwargs off a fields.*(...) call.
+
+    We don't evaluate expressions; anything non-literal is skipped so
+    AST parsing never runs user code.
+    """
+    out: dict[str, object] = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            continue
+        if kw.arg not in {"compute", "related", "comodel_name", "inverse_name", "string", "store"}:
+            continue
+        try:
+            out[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, SyntaxError):
+            continue
+    # For relational fields the first positional arg is comodel_name;
+    # for other field types it's typically `string` (label). Only
+    # claim it as comodel_name when the field type supports it.
+    if (
+        call.args
+        and field_type in _RELATIONAL_FIELD_TYPES
+        and "comodel_name" not in out
+    ):
+        try:
+            first = ast.literal_eval(call.args[0])
+            if isinstance(first, str):
+                out["comodel_name"] = first
+        except (ValueError, SyntaxError):
+            pass
+    return out
+
+
+def _index_file_fields(file_path: str) -> dict[tuple[str, int], list[dict]]:
+    """Index ``file_path`` and return {(class_qualname, class_line_start): [fields]}."""
+    try:
+        with open(file_path, encoding="utf-8") as fp:
+            source = fp.read()
+    except (OSError, UnicodeDecodeError):
+        return {}
+    try:
+        tree = ast.parse(source, filename=file_path)
+    except SyntaxError:
+        return {}
+
+    result: dict[tuple[str, int], list[dict]] = {}
+
+    def _walk(node: ast.AST, prefix: str = "") -> None:
+        if isinstance(node, ast.ClassDef):
+            qualname = f"{prefix}{node.name}" if prefix else node.name
+            key = (qualname, node.lineno)
+            fields: list[dict] = []
+            for stmt in node.body:
+                # fields show up as `name = fields.X(...)` — one or
+                # more targets on a simple Assign / AnnAssign node.
+                if isinstance(stmt, ast.Assign):
+                    call = stmt.value
+                    targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
+                elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                    call = stmt.value
+                    targets = [stmt.target]
+                else:
+                    continue
+                is_field, field_type = _is_fields_call(call) if call else (False, None)
+                if not is_field or call is None:
+                    continue
+                assert isinstance(call, ast.Call)
+                kwargs = _extract_field_kwargs(call, field_type)
+                for target in targets:
+                    fields.append({
+                        "name": target.id,
+                        "line_start": stmt.lineno,
+                        "line_end": getattr(stmt, "end_lineno", stmt.lineno) or stmt.lineno,
+                        "field_type": field_type,
+                        **kwargs,
+                    })
+            result[key] = fields
+            # Recurse for nested classes (rare but possible).
+            for child in node.body:
+                _walk(child, f"{qualname}.")
+        else:
+            for child in ast.iter_child_nodes(node):
+                _walk(child, prefix)
+
+    _walk(tree)
+    return result
+
+
+def _fields_in_class(file_path: str, class_qualname: str, class_line_start: int) -> list[dict]:
+    file_index = _FILE_FIELDS_CACHE.get(file_path)
+    if file_index is None:
+        file_index = _index_file_fields(file_path)
+        _FILE_FIELDS_CACHE[file_path] = file_index
+    return file_index.get((class_qualname, class_line_start), [])
 
 
 def _method_location(method: object) -> dict[str, object] | None:
@@ -218,6 +343,14 @@ def extract_model_info(pool: dict, model_name: str) -> dict | None:
         cached = _class_location(klass)
         if cached is not None:
             loc.update(cached)
+            # AST-index field assignments in this class. Requires both
+            # a resolved file and a known class-start line.
+            file_path = cached.get("file")
+            line_start = cached.get("line_start")
+            if isinstance(file_path, str) and isinstance(line_start, int):
+                loc["fields"] = _fields_in_class(
+                    file_path, klass.__qualname__, line_start
+                )
         class_locations.append(loc)
     info["extending_modules"] = extending_modules
     info["class_locations"] = class_locations
