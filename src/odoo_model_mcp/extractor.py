@@ -6,6 +6,53 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+_CLASS_LOCATION_CACHE: dict[int, dict[str, object] | None] = {}
+
+
+def _class_location(klass: type) -> dict[str, object] | None:
+    """Return {file, line_start, line_end} for a class, or None.
+
+    Cached by id(klass): the same class object appears in many MROs
+    (common mixins like BaseModel, MailThread), and inspect's tokenizer
+    is the main hot path of a bulk registry dump.
+    """
+    key = id(klass)
+    if key in _CLASS_LOCATION_CACHE:
+        return _CLASS_LOCATION_CACHE[key]
+    result: dict[str, object] | None
+    try:
+        source_file = inspect.getfile(klass)
+        lines, line_start = inspect.getsourcelines(klass)
+        result = {
+            "file": source_file,
+            "line_start": line_start,
+            "line_end": line_start + len(lines) - 1,
+        }
+    except (TypeError, OSError):
+        result = None
+    _CLASS_LOCATION_CACHE[key] = result
+    return result
+
+
+def _method_location(method: object) -> dict[str, object] | None:
+    key = id(method)
+    if key in _CLASS_LOCATION_CACHE:
+        return _CLASS_LOCATION_CACHE[key]
+    result: dict[str, object] | None
+    try:
+        source_file = inspect.getfile(method)
+        lines, line_start = inspect.getsourcelines(method)
+        result = {
+            "file": source_file,
+            "line_start": line_start,
+            "line_end": line_start + len(lines) - 1,
+        }
+    except (TypeError, OSError):
+        result = None
+    _CLASS_LOCATION_CACHE[key] = result
+    return result
+
+
 def extract_field_info(model_cls, field_name: str) -> dict | None:
     """Extract metadata for a single field from a model's registry class."""
     # Walk _field_definitions across MRO to find the field
@@ -120,15 +167,11 @@ def extract_method_info(model_cls, method_name: str) -> list[dict]:
                     except TypeError:
                         entry[key] = repr(val)
 
-        # Source location
-        try:
-            source_file = inspect.getfile(method)
-            lines, line_no = inspect.getsourcelines(method)
-            entry["file"] = source_file
-            entry["line"] = line_no
-            entry["line_end"] = line_no + len(lines) - 1
-        except (TypeError, OSError):
-            pass
+        loc = _method_location(method)
+        if loc is not None:
+            entry["file"] = loc["file"]
+            entry["line"] = loc["line_start"]
+            entry["line_end"] = loc["line_end"]
 
         overrides.append(entry)
 
@@ -172,13 +215,9 @@ def extract_model_info(pool: dict, model_name: str) -> dict | None:
         extending_modules.append(mod)
 
         loc: dict = {"module": mod, "class": klass.__qualname__, "order": order}
-        try:
-            loc["file"] = inspect.getfile(klass)
-            lines, line_start = inspect.getsourcelines(klass)
-            loc["line_start"] = line_start
-            loc["line_end"] = line_start + len(lines) - 1
-        except (TypeError, OSError):
-            pass
+        cached = _class_location(klass)
+        if cached is not None:
+            loc.update(cached)
         class_locations.append(loc)
     info["extending_modules"] = extending_modules
     info["class_locations"] = class_locations
