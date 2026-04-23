@@ -156,7 +156,7 @@ class WorkerConnection:
                 except OSError:
                     pass
 
-    def send(self, command: dict) -> dict:
+    def send(self, command: dict, timeout: float = 30) -> dict:
         """Send a command to the worker and return the result. Thread-safe."""
         with self._lock:
             try:
@@ -166,7 +166,7 @@ class WorkerConnection:
 
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                sock.settimeout(30)
+                sock.settimeout(timeout)
                 sock.connect(self.socket_path)
                 sock.sendall(json.dumps(command).encode() + b"\n")
 
@@ -247,7 +247,7 @@ _pool = WorkerPool()
 atexit.register(_pool.shutdown_all)
 
 
-def _run_worker(command: dict) -> dict:
+def _run_worker(command: dict, timeout: float = 30) -> dict:
     """Send a command to the appropriate persistent worker."""
     project_path = command["project_path"]
     addons_paths = command.get("addons_paths")
@@ -258,7 +258,7 @@ def _run_worker(command: dict) -> dict:
     except ValueError as e:
         return {"error": str(e)}
 
-    return worker.send(command)
+    return worker.send(command, timeout=timeout)
 
 
 def create_server() -> FastMCP:
@@ -389,6 +389,69 @@ def create_server() -> FastMCP:
             "addons_paths": addons_paths,
             "exclude_modules": exclude_modules,
         })
+        return json.dumps(result, default=str)
+
+    @mcp.tool()
+    def list_models(
+        project_path: str,
+        addons_paths: list[str] | None = None,
+        exclude_modules: list[str] | None = None,
+    ) -> str:
+        """List every model in the project registry with lightweight metadata.
+
+        Returns: name, description, module, field_count, abstract, transient.
+        Cheap to call; does not include per-field or per-method detail.
+
+        Args:
+            project_path: Path to the Odoo project root
+            addons_paths: Optional explicit addons paths (auto-detected if omitted)
+            exclude_modules: Optional list of module names to skip loading
+        """
+        result = _run_worker({
+            "action": "list_models",
+            "project_path": project_path,
+            "addons_paths": addons_paths,
+            "exclude_modules": exclude_modules,
+        })
+        return json.dumps(result, default=str)
+
+    @mcp.tool()
+    def dump_registry(
+        project_path: str,
+        output_path: str,
+        include_methods: bool = True,
+        addons_paths: list[str] | None = None,
+        exclude_modules: list[str] | None = None,
+    ) -> str:
+        """Bulk export the entire registry to a JSONL file.
+
+        Emits one JSON object per line. Record types:
+          {"type": "model", "data": {...model_info...}}
+          {"type": "method_overrides", "model": "...", "method": "...", "overrides": [...]}
+
+        Designed for initial ingestion: one call replaces thousands of
+        per-model round trips. Writes to a file on disk (where the worker
+        runs) to avoid oversized MCP responses.
+
+        Args:
+            project_path: Path to the Odoo project root
+            output_path: Absolute path where the JSONL file will be written
+            include_methods: If True, emit method_overrides records for every
+                decorated method. Default True.
+            addons_paths: Optional explicit addons paths (auto-detected if omitted)
+            exclude_modules: Optional list of module names to skip loading
+        """
+        result = _run_worker(
+            {
+                "action": "dump_registry",
+                "project_path": project_path,
+                "output_path": output_path,
+                "include_methods": include_methods,
+                "addons_paths": addons_paths,
+                "exclude_modules": exclude_modules,
+            },
+            timeout=1800,
+        )
         return json.dumps(result, default=str)
 
     @mcp.tool()

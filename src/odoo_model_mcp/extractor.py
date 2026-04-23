@@ -112,8 +112,13 @@ def extract_method_info(model_cls, method_name: str) -> list[dict]:
                     entry[key] = "<dynamic>"
                 elif isinstance(val, str):
                     entry[key] = [val]
+                elif isinstance(val, bool):
+                    entry[key] = val
                 else:
-                    entry[key] = list(val)
+                    try:
+                        entry[key] = list(val)
+                    except TypeError:
+                        entry[key] = repr(val)
 
         # Source location
         try:
@@ -263,6 +268,25 @@ def extract_model_graph(pool: dict, model_name: str) -> dict | None:
                 })
 
     return graph
+
+
+def list_models(pool: dict) -> list[dict]:
+    """Return lightweight metadata for every model in the registry."""
+    results = []
+    for name, cls in sorted(pool.items()):
+        results.append({
+            "name": name,
+            "description": getattr(cls, "_description", "") or "",
+            "module": getattr(cls, "_original_module", None),
+            "field_count": len(set(
+                f.name
+                for k in cls.__mro__
+                for f in getattr(k, "_field_definitions", [])
+            )),
+            "abstract": getattr(cls, "_abstract", False),
+            "transient": getattr(cls, "_transient", False),
+        })
+    return results
 
 
 def search_models(pool: dict, query: str) -> list[dict]:

@@ -90,7 +90,72 @@ def _dispatch(pool: dict, project: dict, command: dict) -> dict:
     if action == "search_models":
         return extractor.search_models(pool, command["query"])
 
+    if action == "list_models":
+        return extractor.list_models(pool)
+
+    if action == "dump_registry":
+        return _dump_registry(pool, command)
+
     return {"error": f"Unknown action: {action}"}
+
+
+def _dump_registry(pool: dict, command: dict) -> dict:
+    """Stream every model's info as JSONL to the requested output path.
+
+    Emits one JSON object per line. Record types:
+      {"type": "model", "data": {model_info}}
+      {"type": "method_overrides", "model": "...", "method": "...", "overrides": [...]}
+
+    Separating method overrides from model info keeps per-line size bounded
+    and gives the ingester a stable shape for odoo_symbols rows.
+    """
+    from . import extractor
+
+    output_path = command.get("output_path")
+    if not output_path:
+        return {"error": "output_path is required"}
+
+    include_methods = command.get("include_methods", True)
+
+    output_path = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    start = time.monotonic()
+    lines = 0
+    with open(output_path, "w", encoding="utf-8") as fp:
+        for name in sorted(pool):
+            info = extractor.extract_model_info(pool, name)
+            if info is None:
+                continue
+            fp.write(json.dumps({"type": "model", "data": info}, default=str))
+            fp.write("\n")
+            lines += 1
+
+            if include_methods:
+                model_cls = pool[name]
+                for method_name in info.get("decorated_methods", []):
+                    overrides = extractor.extract_method_info(
+                        model_cls, method_name
+                    )
+                    if not overrides:
+                        continue
+                    fp.write(json.dumps({
+                        "type": "method_overrides",
+                        "model": name,
+                        "method": method_name,
+                        "overrides": overrides,
+                    }, default=str))
+                    fp.write("\n")
+                    lines += 1
+
+    elapsed = time.monotonic() - start
+    return {
+        "path": output_path,
+        "lines": lines,
+        "bytes": os.path.getsize(output_path),
+        "model_count": len(pool),
+        "elapsed_seconds": round(elapsed, 2),
+    }
 
 
 def _handle_client(conn: socket.socket, pool: dict, project: dict,
