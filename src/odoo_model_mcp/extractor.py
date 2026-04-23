@@ -123,9 +123,10 @@ def extract_method_info(model_cls, method_name: str) -> list[dict]:
         # Source location
         try:
             source_file = inspect.getfile(method)
-            _, line_no = inspect.getsourcelines(method)
+            lines, line_no = inspect.getsourcelines(method)
             entry["file"] = source_file
             entry["line"] = line_no
+            entry["line_end"] = line_no + len(lines) - 1
         except (TypeError, OSError):
             pass
 
